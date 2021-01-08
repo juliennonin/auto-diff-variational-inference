@@ -64,21 +64,22 @@ class LinearModel(Model):
 # %%
 class ADVI:
     def __init__(self, model, inv_T):
-        # self.model = model
+        self.model = model
         self.inv_T = inv_T
-        self.dim = model.dim
+        self.dim = self.model.dim
 
         ## Compute Gradients
-        self.grad_log_joint = elementwise_grad(model.log_joint)
-        self.grad_inv_T = elementwise_grad(inv_T)
+        self.grad_log_joint = elementwise_grad(model.log_joint)  # θ -> ∇log p(x, θ)
+        self.grad_inv_T = elementwise_grad(inv_T)  # ζ -> ∇T⁻¹(ζ)
         
         jacobian_det_inv_T = lambda zeta: np.linalg.det(jacobian(inv_T)(zeta))
-        self.grad_log_jac_inv_T = elementwise_grad(lambda zeta: np.log(np.abs(jacobian_det_inv_T(zeta))))
+        self.log_jac_inv_T = lambda zeta: np.log(np.abs(jacobian_det_inv_T(zeta)))  # ζ -> log|det J_{T⁻¹}(ζ)| 
+        self.grad_log_jac_inv_T = elementwise_grad(self.log_jac_inv_T)  # ζ -> ∇log|det J_{T⁻¹}(ζ)| 
 
         # To optimize
-        self.mu = np.ones(self.dim)
-        self.omega = np.ones(self.dim)
-        self.history = {"mu": [], "omega": []}
+        self.mu = np.zeros(self.dim)
+        self.omega = np.zeros(self.dim)
+        self.history = {"mu": [], "omega": [], "elbo": []}
 
     def update_params(self, mu, omega):
         # [TODO] Create setter for properties mu and omega
@@ -88,10 +89,16 @@ class ADVI:
         self.history["mu"].append(mu)
         self.history["omega"].append(omega)
 
+    def _zeta(self, eta):
+        return eta * np.exp(self.omega) + self.mu
+
+    def _theta(self, zeta):
+        return self.inv_T(zeta)
+
     def _nabla_mu_inside_expect(self, eta):
         assert len(eta) == self.dim
-        zeta = eta * np.exp(self.omega) + self.mu
-        theta = self.inv_T(zeta)
+        zeta = self._zeta(eta)
+        theta = self._theta(zeta)
 
         grad_log_joint_eval = self.grad_log_joint(theta)
         grad_inv_T_eval = self.grad_inv_T(zeta)
@@ -99,7 +106,8 @@ class ADVI:
         return grad_log_joint_eval * grad_inv_T_eval + grad_log_jac_inv_T_eval
 
     def _nabla_omega_inside_expect(self, nabla_mu_eval, eta):
-        return np.dot(nabla_mu_eval, eta) * np.exp(self.omega) + 1
+        # [TODO] Is it an elementwise product between coeffs of the gradients?
+        return nabla_mu_eval * eta * np.exp(self.omega) + 1
 
     def _gradients_approximate(self, M):
         # Draw M samples η from the standard multivariate Gaussian N(0,I)
@@ -111,16 +119,35 @@ class ADVI:
             nabla_mu += nabla_mu_eval
             nabla_omega += self._nabla_omega_inside_expect(nabla_mu_eval, eta)
         return nabla_mu / M, nabla_omega / M
+    
+    def _approximate_elbo(self, M):
+        """Approximate the elbo for the current mu and omega values using MC integration (cf. equation 5)
+        [TODO] Do we use the same etas that are sampled during each step of the optimization?
+        """
+        elbo_left = 0
+        for _ in range(M):
+            eta = np.random.normal(size=self.dim)
+            zeta = self._zeta(eta)
+            theta = self._theta(zeta)
 
-    def run(self, learning_rate, M=10):
+            elbo_left += self.model.log_joint(theta) + self.log_jac_inv_T(zeta)
+        elbo_left /= M
+
+        entropy = self.omega.sum()  # + constant = 0.5 * self.dim * (1 + np.log(2 * np.π))
+        return elbo_left + entropy
+
+    def run(self, learning_rate, M=10, epsilon=0.01, verbose=True):
         # Stochastic optimization
         def get_learning_rate(i, s, grad, tau=1, alpha=0.1):
             s = alpha * grad**2 + (1 - alpha) * s
             rho = learning_rate * (i ** (-0.5 + 1e-16)) / (tau + np.sqrt(s))
             return rho, s
         
-        i = 1    
-        while i < 1000:  # Change using ELBO
+        elbo_old = self._approximate_elbo(M)
+        delta_elbo = 2 * epsilon
+
+        i = 1
+        while np.abs(delta_elbo) > epsilon:  # Change using ELBO
             # Approximate gradients using MC integration
             nabla_mu, nabla_omega = self._gradients_approximate(M)
 
@@ -136,26 +163,41 @@ class ADVI:
                 self.omega + rho_omega * nabla_omega
             )
 
+            # Update elbo
+            elbo = self._approximate_elbo(100)
+            self.history["elbo"].append(elbo)
+            delta_elbo = elbo - elbo_old
+            print(i, self.mu)
+            elbo_old = elbo
+
+            if verbose and (i % 100 == 0):
+                print(f"ELBO {elbo}, mu {self.mu}, omega {self.omega}")
+
             i += 1
 
 
 # %%
+if __name__ == "__main__":
+    N, d = 1000, 1
+    betas_true = np.array([5, -3])
+    sigma_true = 2.5
 
-N, d = 1000, 1
-betas_true = np.array([5, -3])
-sigma_true = 2.5
+    X = np.random.normal(0, 2, (N, d))
+    X_ones = np.hstack([np.ones((N, 1)), X])
+    y = X_ones @ betas_true + np.random.normal(0, sigma_true, N)
 
-X = np.random.normal(0, 2, (N, d))
-X_ones = np.hstack([np.ones((N, 1)), X])
-y = X_ones @ betas_true + np.random.normal(0, sigma_true, N)
+    model = LinearModel(X, y, 0, 10, 1, 2)
+    model.describe()
 
-model = LinearModel(X, y, 0, 10, 1, 2)
-model.describe()
-
-def inv_T(zeta):
-    return np.array([*zeta[:-1], np.exp(zeta[-1])], dtype=float)
-
-advi = ADVI(model, inv_T)
-advi.run(learning_rate=0.03)
-print(inv_T(advi.mu))
+    
+    def inv_T(zeta):
+        return np.array([*zeta[:-1], np.exp(zeta[-1])], dtype=float)
+    inv_T_vec = np.vectorize(inv_T, signature='(n)->(n)')
+    
+    advi = ADVI(model, inv_T)
+    advi.run(learning_rate=0.5)
+    print()
+    print("Theta True", [*betas_true, sigma_true])
+    print("Theta Pred mean", inv_T(advi.mu))
+    print("Theta Pred std", inv_T(advi.mu))
 # %%
