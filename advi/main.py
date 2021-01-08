@@ -64,8 +64,9 @@ class LinearModel(Model):
 # %%
 class ADVI:
     def __init__(self, model, inv_T):
-        self.model = model
+        # self.model = model
         self.inv_T = inv_T
+        self.dim = model.dim
 
         ## Compute Gradients
         self.grad_log_joint = elementwise_grad(model.log_joint)
@@ -75,11 +76,20 @@ class ADVI:
         self.grad_log_jac_inv_T = elementwise_grad(lambda zeta: np.log(np.abs(jacobian_det_inv_T(zeta))))
 
         # To optimize
-        self.mu = np.ones(self.model.dim)
-        self.omega = np.ones(self.model.dim)
+        self.mu = np.ones(self.dim)
+        self.omega = np.ones(self.dim)
+        self.history = {"mu": [], "omega": []}
+
+    def update_params(self, mu, omega):
+        # [TODO] Create setter for properties mu and omega
+        assert mu.shape[0] == self.dim
+        assert omega.shape[0] == self.dim
+        self.mu, self.omega = mu, omega
+        self.history["mu"].append(mu)
+        self.history["omega"].append(omega)
 
     def _nabla_mu_inside_expect(self, eta):
-        assert len(eta) == self.model.dim
+        assert len(eta) == self.dim
         zeta = eta * np.exp(self.omega) + self.mu
         theta = self.inv_T(zeta)
 
@@ -91,13 +101,47 @@ class ADVI:
     def _nabla_omega_inside_expect(self, nabla_mu_eval, eta):
         return np.dot(nabla_mu_eval, eta) * np.exp(self.omega) + 1
 
-    def run(self):
+    def _gradients_approximate(self, M):
+        # Draw M samples η from the standard multivariate Gaussian N(0,I)
+        nabla_mu = np.zeros(self.dim)
+        nabla_omega = np.zeros(self.dim)
+        for m in range(M):
+            eta = np.random.normal(size=self.dim)
+            nabla_mu_eval = self._nabla_mu_inside_expect(eta)
+            nabla_mu += nabla_mu_eval
+            nabla_omega += self._nabla_omega_inside_expect(nabla_mu_eval, eta)
+        return nabla_mu / M, nabla_omega / M
+
+    def run(self, learning_rate, M=10):
         # Stochastic optimization
-        pass
+        def get_learning_rate(i, s, grad, tau=1, alpha=0.1):
+            s = alpha * grad**2 + (1 - alpha) * s
+            rho = learning_rate * (i ** (-0.5 + 1e-16)) / (tau + np.sqrt(s))
+            return rho, s
+        
+        i = 1    
+        while i < 1000:  # Change using ELBO
+            # Approximate gradients using MC integration
+            nabla_mu, nabla_omega = self._gradients_approximate(M)
+
+            # Calculate step size
+            if i == 1:
+                s_mu, s_omega = nabla_mu ** 2, nabla_omega ** 2
+            rho_mu, s_mu = get_learning_rate(i, s_mu, nabla_mu)
+            rho_omega, s_omega = get_learning_rate(i, s_omega, nabla_omega)
+
+            # Update mu and omega
+            self.update_params(
+                self.mu + rho_mu * nabla_mu,
+                self.omega + rho_omega * nabla_omega
+            )
+
+            i += 1
+
 
 # %%
 
-N, d = 50, 1
+N, d = 1000, 1
 betas_true = np.array([5, -3])
 sigma_true = 2.5
 
@@ -112,3 +156,6 @@ def inv_T(zeta):
     return np.array([*zeta[:-1], np.exp(zeta[-1])], dtype=float)
 
 advi = ADVI(model, inv_T)
+advi.run(learning_rate=0.03)
+print(inv_T(advi.mu))
+# %%
