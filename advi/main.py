@@ -30,8 +30,8 @@ class ADVI:
         assert mu.shape[0] == self.dim
         assert omega.shape[0] == self.dim
         self.mu, self.omega = mu, omega
-        self.history["mu"].append(mu)
-        self.history["omega"].append(omega)
+        # self.history["mu"].append(mu)
+        # self.history["omega"].append(omega)
 
     def _zeta(self, eta):
         return eta * np.exp(self.omega) + self.mu
