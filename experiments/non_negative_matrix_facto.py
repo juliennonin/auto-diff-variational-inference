@@ -52,7 +52,8 @@ class GammaPoissonModel:
 
 # %%
 if __name__ == "__main__":
-    data = loadmat("data/frey_rawface.mat")["ff"].T[10:]
+    from scipy.special import expit
+    data = loadmat("data/frey_rawface.mat")["ff"].T
 
     model = GammaPoissonModel(data)
 
@@ -60,7 +61,13 @@ if __name__ == "__main__":
         return np.logaddexp(zeta, 0)  # T¹(zeta) -> log(exp(zeta) + 1)
 
     advi = ADVI(model, inv_T)
-    advi.run(learning_rate=0.5)
+    advi.log_jac_inv_T = lambda zeta: np.sum(-np.logaddexp(-zeta, 0))
+    advi.grad_log_jac_inv_T = lambda zeta: expit(-zeta)
+
+    # Load already trained advi or train it!
+    advi.mu = np.loadtxt("data/nmf_advi_mu.txt")
+    advi.omega = np.loadtxt("data/nmf_advi_omega.txt")
+    # advi.run(learning_rate=0.5)
 
 
 # %%

@@ -105,7 +105,7 @@ class ADVI:
                 self.mu + rho_mu * nabla_mu,
                 self.omega + rho_omega * nabla_omega
             )
-
+            print(i, self.mu[:10])
             # Update elbo
             elbo = self._approximate_elbo(100)
             self.history["elbo"].append(elbo)
